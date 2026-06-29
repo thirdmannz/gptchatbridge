@@ -1,0 +1,14 @@
+node_modules/
+browser-data/
+downloads/
+.env
+users.json
+*.log
+.DS_Store
+*.swp
+*.swo
+coverage/
+.nyc_output/
+dist/
+build/
+logs/

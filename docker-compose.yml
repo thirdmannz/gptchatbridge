@@ -1,0 +1,72 @@
+# ChatGPT Bridge — Docker Compose
+#
+# Usage:
+#   1. Build:     docker compose build
+#   2. Login:     docker compose --profile login up login
+#                 → open http://server-ip:6080 in your browser
+#                 → log in to ChatGPT, wait for "Login successful"
+#                 → Ctrl+C to stop (session saved in browser-data/)
+#   3. Start:     docker compose up -d
+#   4. Check:     curl http://localhost:3400/api/health
+#   5. Logs:      docker compose logs -f
+#   6. Stop:      docker compose down
+#
+# Multi-user: create users.json before building (see users.json.example)
+#   cp users.json.example users.json
+#   edit users.json with your user IDs and API keys
+
+services:
+  bridge:
+    build: .
+    ports:
+      - "${PORT:-3400}:3400"
+    volumes:
+      # Persistent browser profiles (one subdir per user)
+      - ./browser-data:/app/browser-data
+      # Downloaded images
+      - ./downloads:/app/downloads
+      # Environment file (optional — uncomment if you use .env)
+      # - ./.env:/app/.env:ro
+      # Multi-user config (optional — uncomment if you use users.json)
+      # - ./users.json:/app/users.json:ro
+    environment:
+      - PORT=3400
+      - HEADLESS=false
+      - LOG_LEVEL=info
+      - NODE_ENV=production
+      - MAX_CONCURRENT_USERS=5
+      - DISPLAY=:99
+      # Set ALLOWED_ORIGINS in production: https://yourapp.com
+      - ALLOWED_ORIGINS=*
+      # Set ENABLE_DEBUG=true only for development
+      - ENABLE_DEBUG=false
+    restart: unless-stopped
+    # Chromium needs these for stability in containers:
+    init: true          # PID 1 zombie reaping + signal forwarding
+    ipc: host           # Shared memory for Chromium (prevents OOM crashes)
+    shm_size: 2gb       # Chromium needs lots of shared memory
+
+  # Remote login service — noVNC web client for interactive login
+  # Usage:
+  #   docker compose --profile login up login           (default user)
+  #   docker compose --profile login up login alice      (multi-user)
+  #
+  # Then open http://server-ip:6080/vnc.html in your browser.
+  # Log in to ChatGPT, wait for "Login successful" in the logs, Ctrl+C to stop.
+  login:
+    build: .
+    entrypoint: ["/app/scripts/remote-login.sh"]
+    command: ["default"]  # Change to "alice" for multi-user
+    ports:
+      - "6080:6080"       # noVNC web client
+    volumes:
+      - ./browser-data:/app/browser-data
+    environment:
+      - HEADLESS=false
+      - DISPLAY=:99
+      - VNC_RESOLUTION=1280x900
+    init: true
+    ipc: host
+    shm_size: 2gb
+    profiles:
+      - login  # Only runs when explicitly invoked
