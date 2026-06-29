@@ -27,6 +27,10 @@ let agentEventSource = null;
 
 // ── Init ────────────────────────────────────────────
 
+// Track last-known browser state to detect transitions (e.g. "not logged in" → "logged in")
+let lastLoggedIn = null;
+let statusPollTimer = null;
+
 document.addEventListener('DOMContentLoaded', () => {
   initTheme();
   initUserSwitcher();
@@ -39,8 +43,18 @@ document.addEventListener('DOMContentLoaded', () => {
     refreshSessions();
     checkStatus();
     loadModels();
+    startStatusPolling();
   });
 });
+
+// Poll /api/status every 10s. If the browser transitions from not-logged-in
+// to logged-in (e.g. finished booting), auto-refresh the session list.
+function startStatusPolling() {
+  if (statusPollTimer) clearInterval(statusPollTimer);
+  statusPollTimer = setInterval(async () => {
+    await checkStatus();
+  }, 10000);
+}
 
 // ── Theme ───────────────────────────────────────────
 
@@ -125,6 +139,9 @@ function initWebSocket() {
   ws.onopen = () => {
     ws.send(JSON.stringify({ type: 'subscribe' }));
     updateConnectionStatus(true);
+    // Re-check status + refresh sessions on reconnect (browser may have restarted)
+    checkStatus();
+    refreshSessions();
   };
   ws.onmessage = (evt) => handleWSMessage(JSON.parse(evt.data));
   ws.onclose = () => {
@@ -331,7 +348,13 @@ async function checkStatus() {
   const data = await apiFetch('/status');
   if (data.ok) {
     updateConnectionStatus(true);
-    if (!data.loggedIn) {
+    // Detect login state transition: not-logged-in → logged-in
+    if (data.loggedIn && lastLoggedIn === false) {
+      // Browser just came online — refresh sessions automatically
+      refreshSessions();
+    }
+    lastLoggedIn = data.loggedIn;
+    if (!data.loggedIn && lastLoggedIn !== false) {
       toast('Not logged in to ChatGPT — run npm run login', 'error');
     }
   }
@@ -389,7 +412,14 @@ async function selectSession(id) {
 async function loadMessages(id) {
   const el = document.getElementById('messages');
   el.innerHTML = '<div class="text-center py-8 text-text-faint text-xs">Loading messages...</div>';
-  const data = await apiFetch(`/sessions/${id}`);
+  let data = await apiFetch(`/sessions/${id}`);
+
+  // If the browser is still navigating to the session, the first scrape
+  // may return 0 messages. Wait 1.5s and retry once.
+  if (data.ok && data.messages.length === 0) {
+    await new Promise(r => setTimeout(r, 1500));
+    data = await apiFetch(`/sessions/${id}`);
+  }
 
   if (data.ok) {
     currentMessages = data.messages;

@@ -49,17 +49,24 @@ class BrowserManager {
       fs.mkdirSync(this.dataDir, { recursive: true });
     }
 
-    this.browser = await chromium.launchPersistentContext(this.dataDir, {
-      headless: this.headless,
-      viewport: { width: CFG.VIEWPORT_WIDTH, height: CFG.VIEWPORT_HEIGHT },
-      args: [
-        '--disable-blink-features=AutomationControlled',
-        '--disable-features=AutomationControlled,Translate',
-        '--no-sandbox',
-      ],
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      ignoreDefaultArgs: ['--enable-automation'],
-    });
+    try {
+      this.browser = await this._launchBrowser();
+    } catch (err) {
+      // "Opening in existing browser session" or "profile in use" —
+      // an orphan Chromium process is still holding the user-data-dir.
+      // Kill it and retry once.
+      if (err.message && (err.message.includes('existing browser session') || err.message.includes('profile appears to be in use'))) {
+        log.warn(`[Browser:${this.userId}] Stale Chromium process detected, killing and retrying...`);
+        this._killOrphanChromium();
+        // Also clean stale lock files
+        for (const lockfile of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+          try { fs.unlinkSync(path.join(this.dataDir, lockfile)); } catch {}
+        }
+        this.browser = await this._launchBrowser();
+      } else {
+        throw err;
+      }
+    }
 
     const pages = this.browser.pages();
     this.page = pages.length > 0 ? pages[0] : await this.browser.newPage();
@@ -91,6 +98,39 @@ class BrowserManager {
     return this.page;
   }
 
+  async _launchBrowser() {
+    return await chromium.launchPersistentContext(this.dataDir, {
+      headless: this.headless,
+      viewport: { width: CFG.VIEWPORT_WIDTH, height: CFG.VIEWPORT_HEIGHT },
+      args: [
+        '--disable-blink-features=AutomationControlled',
+        '--disable-features=AutomationControlled,Translate',
+        '--no-sandbox',
+      ],
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      ignoreDefaultArgs: ['--enable-automation'],
+    });
+  }
+
+  _killOrphanChromium() {
+    // Kill any Chromium process using this user-data-dir.
+    // Uses pgrep/pkill which are available in the Docker image and most Linux systems.
+    try {
+      const { execSync } = require('child_process');
+      // Find Chromium processes with our user-data-dir in their command line
+      const out = execSync(
+        `pgrep -f "chrome.*--user-data-dir=${this.dataDir}" 2>/dev/null || true`,
+        { encoding: 'utf8', timeout: 5000 }
+      ).trim();
+      if (out) {
+        for (const pid of out.split('\n').filter(Boolean)) {
+          try { process.kill(parseInt(pid), 'SIGKILL'); } catch {}
+        }
+        log.info(`[Browser:${this.userId}] Killed orphan Chromium process(es): ${out.replace(/\n/g, ', ')}`);
+      }
+    } catch {}
+  }
+
   async getPage() {
     if (this.page && !this.page.isClosed()) {
       try {
@@ -100,7 +140,7 @@ class BrowserManager {
         log.info(`[Browser:${this.userId}] Health check failed, reinitializing:`, err.message);
         this.page = null;
         this.context = null;
-        this.browser = null;
+        // Don't null this.browser here — the close block below needs it.
       }
     }
 
